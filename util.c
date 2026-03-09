@@ -659,12 +659,201 @@ static int b58check(unsigned char *bin, size_t binsz, const char *b58)
 	return bin[0];
 }
 
+/* Bech32/Bech32m decoding (BIP173/BIP350) */
+
+static const int8_t bech32_charset_rev[128] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	15, -1, 10, 17, 21, 20, 26, 30,  7,  5, -1, -1, -1, -1, -1, -1,
+	-1, 29, -1, 24, 13, 25,  9,  8, 23, -1, 18, 22, 31, 27, 19, -1,
+	 1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1,
+	-1, 29, -1, 24, 13, 25,  9,  8, 23, -1, 18, 22, 31, 27, 19, -1,
+	 1,  0,  3, 16, 11, 28, 12, 14,  6,  4,  2, -1, -1, -1, -1, -1
+};
+
+static uint32_t bech32_polymod(const uint8_t *values, size_t len)
+{
+	uint32_t chk = 1;
+	size_t i;
+	for (i = 0; i < len; i++) {
+		uint8_t top = chk >> 25;
+		chk = ((chk & 0x1ffffff) << 5) ^ values[i];
+		if (top & 1)  chk ^= 0x3b6a57b2;
+		if (top & 2)  chk ^= 0x26508e6d;
+		if (top & 4)  chk ^= 0x1ea119fa;
+		if (top & 8)  chk ^= 0x3d4233dd;
+		if (top & 16) chk ^= 0x2a1462b3;
+	}
+	return chk;
+}
+
+static int bech32_verify_checksum(const char *hrp, const uint8_t *data,
+                                  size_t data_len)
+{
+	size_t hrp_len = strlen(hrp);
+	size_t expand_len = hrp_len * 2 + 1 + data_len;
+	uint8_t values[256];
+	size_t i;
+	uint32_t check;
+
+	for (i = 0; i < hrp_len; i++)
+		values[i] = hrp[i] >> 5;
+	values[hrp_len] = 0;
+	for (i = 0; i < hrp_len; i++)
+		values[hrp_len + 1 + i] = hrp[i] & 0x1f;
+	memcpy(values + hrp_len * 2 + 1, data, data_len);
+
+	check = bech32_polymod(values, expand_len);
+	if (check == 1)
+		return 1;  /* BECH32 */
+	if (check == 0x2bc830a3)
+		return 2;  /* BECH32M */
+	return 0;
+}
+
+static int bech32_decode(char *hrp, uint8_t *data, size_t *data_len,
+                         const char *input)
+{
+	size_t input_len = strlen(input);
+	size_t i;
+	int sep_pos = -1;
+	int have_lower = 0, have_upper = 0;
+	int encoding;
+
+	for (i = 0; i < input_len; i++) {
+		unsigned char c = input[i];
+		if (c >= 'a' && c <= 'z') have_lower = 1;
+		if (c >= 'A' && c <= 'Z') have_upper = 1;
+	}
+	if (have_lower && have_upper)
+		return 0;
+
+	for (i = input_len; i > 0; i--) {
+		if (input[i - 1] == '1') {
+			sep_pos = i - 1;
+			break;
+		}
+	}
+	if (sep_pos < 1 || sep_pos + 7 > (int)input_len || input_len > 90)
+		return 0;
+
+	for (i = 0; i < (size_t)sep_pos; i++) {
+		unsigned char c = input[i];
+		if (c < 33 || c > 126)
+			return 0;
+		hrp[i] = (c >= 'A' && c <= 'Z') ? (c + 32) : c;
+	}
+	hrp[sep_pos] = '\0';
+
+	*data_len = input_len - sep_pos - 1;
+	for (i = sep_pos + 1; i < input_len; i++) {
+		unsigned char c = input[i];
+		int8_t val;
+		if (c > 127)
+			return 0;
+		val = bech32_charset_rev[c];
+		if (val == -1)
+			return 0;
+		data[i - sep_pos - 1] = val;
+	}
+
+	encoding = bech32_verify_checksum(hrp, data, *data_len);
+	if (!encoding)
+		return 0;
+
+	*data_len -= 6;
+	return encoding;
+}
+
+static int convert_bits(uint8_t *out, size_t *outlen, int outbits,
+                        const uint8_t *in, size_t inlen, int inbits, int pad)
+{
+	uint32_t val = 0;
+	int bits = 0;
+	uint32_t maxv = ((uint32_t)1 << outbits) - 1;
+	*outlen = 0;
+
+	while (inlen--) {
+		val = (val << inbits) | *(in++);
+		bits += inbits;
+		while (bits >= outbits) {
+			bits -= outbits;
+			out[(*outlen)++] = (val >> bits) & maxv;
+		}
+	}
+	if (pad) {
+		if (bits)
+			out[(*outlen)++] = (val << (outbits - bits)) & maxv;
+	} else if (((val << (outbits - bits)) & maxv) || bits >= inbits) {
+		return 0;
+	}
+	return 1;
+}
+
+static int segwit_addr_decode(int *witver, uint8_t *witprog, size_t *witprog_len,
+                              const char *expected_hrp, const char *addr)
+{
+	char hrp[84];
+	uint8_t data[84];
+	size_t data_len;
+	int encoding;
+
+	encoding = bech32_decode(hrp, data, &data_len, addr);
+	if (!encoding || strcmp(hrp, expected_hrp) != 0)
+		return 0;
+
+	if (data_len < 1 || data[0] > 16)
+		return 0;
+	*witver = data[0];
+
+	if (!convert_bits(witprog, witprog_len, 8, data + 1, data_len - 1, 5, 0))
+		return 0;
+
+	if (*witprog_len < 2 || *witprog_len > 40)
+		return 0;
+
+	if (*witver == 0 && *witprog_len != 20 && *witprog_len != 32)
+		return 0;
+
+	if (*witver == 0 && encoding != 1)
+		return 0;
+	if (*witver != 0 && encoding != 2)
+		return 0;
+
+	return 1;
+}
+
 size_t address_to_script(unsigned char *out, size_t outsz, const char *addr)
 {
 	unsigned char addrbin[25];
 	int addrver;
 	size_t rv;
 
+	/* Try bech32/bech32m (segwit) decode with known Whive HRPs */
+	{
+		static const char *whive_hrps[] = {
+			"wv", "tw", "twv", "wvrt", "rwv", "tb", NULL
+		};
+		int witver;
+		uint8_t witprog[40];
+		size_t witprog_len;
+		int i;
+		for (i = 0; whive_hrps[i]; i++) {
+			if (segwit_addr_decode(&witver, witprog, &witprog_len,
+			                       whive_hrps[i], addr)) {
+				rv = 2 + witprog_len;
+				if (outsz < rv)
+					return rv;
+				out[0] = witver ? (0x50 + witver) : 0x00;
+				out[1] = witprog_len;
+				memcpy(&out[2], witprog, witprog_len);
+				return rv;
+			}
+		}
+	}
+
+	/* Fall through to base58 (legacy) decode */
 	if (!b58dec(addrbin, sizeof(addrbin), addr))
 		return 0;
 	addrver = b58check(addrbin, sizeof(addrbin), addr);

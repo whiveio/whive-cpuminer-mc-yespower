@@ -95,7 +95,7 @@ static char *rpc_url;
 static char *rpc_userpass;
 static char *rpc_user, *rpc_pass;
 static int pk_script_size;
-static unsigned char pk_script[25];
+static unsigned char pk_script[42];
 static char coinbase_sig[101] = "";
 char *opt_cert;
 char *opt_proxy;
@@ -479,13 +479,19 @@ static bool gbt_work_decode(const json_t *val, struct work *work)
 		memset(cbtx+5, 0x00, 32); /* prev txout hash */
 		le32enc((uint32_t *)(cbtx+37), 0xffffffff); /* prev txout index */
 		cbtx_size = 43;
-		/* BIP 34: height in coinbase */
-		for (n = work->height; n; n >>= 8) {
-			cbtx[cbtx_size++] = n & 0xff;
-			if (n < 0x100 && n >= 0x80)
-				cbtx[cbtx_size++] = 0;
+		/* BIP 34: height in coinbase (v29+ uses OP_N for 0-16) */
+		if (work->height == 0) {
+			cbtx[42] = 0x00; /* OP_0 */
+		} else if (work->height >= 1 && work->height <= 16) {
+			cbtx[42] = 0x50 + work->height; /* OP_1..OP_16 */
+		} else {
+			for (n = work->height; n; n >>= 8) {
+				cbtx[cbtx_size++] = n & 0xff;
+				if (n < 0x100 && n >= 0x80)
+					cbtx[cbtx_size++] = 0;
+			}
+			cbtx[42] = cbtx_size - 43;
 		}
-		cbtx[42] = cbtx_size - 43;
 		cbtx[41] = cbtx_size - 42; /* scriptsig length */
 		le32enc((uint32_t *)(cbtx+cbtx_size), 0xffffffff); /* sequence */
 		cbtx_size += 4;
