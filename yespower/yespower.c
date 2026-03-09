@@ -3,15 +3,15 @@
 #include "yespower-opt.c"
 
 static const yespower_params_t yespower_WHIVE = {YESPOWER_1_0, 2048, 32, NULL, 0}; // WHIVE
-static const yespower_params_t yespower_BITZENY = {YESPOWER_0_5, 2048, 32, "Client Key", 10}; // ZNY
-static const yespower_params_t yespower_YENTEN = {YESPOWER_0_5, 4096, 16, "Client Key", 10}; // YTN
-static const yespower_params_t yespower_WAVI = {YESPOWER_0_5, 4096, 32, "WaviBanana", 10}; // WAVI
+static const yespower_params_t yespower_BITZENY = {YESPOWER_0_5, 2048, 32, (const uint8_t *)"Client Key", 10}; // ZNY
+static const yespower_params_t yespower_YENTEN = {YESPOWER_0_5, 4096, 16, (const uint8_t *)"Client Key", 10}; // YTN
+static const yespower_params_t yespower_WAVI = {YESPOWER_0_5, 4096, 32, (const uint8_t *)"WaviBanana", 10}; // WAVI
 static yespower_params_t yespower_KOTO = {YESPOWER_0_5, 2048, 8, NULL, 80}; // KOTO: without const, because it obtains from loop: thanks twitter@WO01_
 
 void yespower_hash( const char *input, char *output, uint32_t len )
 {
-  yespower_KOTO.pers = input;  // KOTO: input variable
-  yespower_tls( (yespower_binary_t*)input, len,
+  yespower_KOTO.pers = (const uint8_t *)input;  // KOTO: input variable
+  yespower_tls( (const uint8_t *)input, len,
                 &yespower_WHIVE,                      // WHIVE
 	        //&yespower_BITZENY,                  // ZNY
                 // &yespower_YENTEN,                   // YTN
